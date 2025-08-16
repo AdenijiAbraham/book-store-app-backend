@@ -19,7 +19,7 @@ if (!fs.existsSync(uploadsDir)) {
 
 // CORS configuration
 app.use(cors({
-    origin: ["http://localhost:5173", 'https://book-store-app-frontend-jh4k.vercel.app'],
+    origin: ["http://localhost:5173", "https://book-store-app-frontend-jh4k.vercel.app"],
     credentials: true,
 }));
 
@@ -36,7 +36,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// 🔥 IMPORTANT: Define root route BEFORE connecting to database
+// Root route
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Book store server is running!',
@@ -47,7 +47,10 @@ app.get('/', (req, res) => {
 
 // Health check route
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
+  res.json({ 
+    status: 'healthy', 
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' 
+  });
 });
 
 // API Routes
@@ -60,43 +63,49 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/auth", userRoutes);
 app.use("/api/admin", AdminRoutes);
 
-// Database connection with better error handling
+// ✅ Database connection with caching for Vercel (critical)
+let isConnected = null;
+
 async function connectDB() {
+  if (isConnected) {
+    console.log("⚡ Using existing MongoDB connection");
+    return;
+  }
+
   try {
     if (!process.env.DB_URL) {
-      throw new Error('DB_URL environment variable is not set');
+      throw new Error("DB_URL environment variable is not set");
     }
-    
-    await mongoose.connect(process.env.DB_URL, {
-      // Add these options for better Vercel compatibility
-      serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+
+    const db = await mongoose.connect(process.env.DB_URL, {
+      serverSelectionTimeoutMS: 5000, // Timeout after 5s
       socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
     });
-    
-    console.log("MongoDB connected successfully");
+
+    isConnected = db.connections[0].readyState === 1;
+    console.log("✅ MongoDB connected successfully");
   } catch (error) {
-    console.error("MongoDB connection error:", error);
-    // Don't exit on Vercel, just log the error
-    if (process.env.NODE_ENV !== 'production') {
-      process.exit(1);
+    console.error("❌ MongoDB connection error:", error.message);
+    if (process.env.NODE_ENV !== "production") {
+      process.exit(1); // Only crash locally
     }
   }
 }
 
-// Connect to database
+// Connect to DB immediately
 connectDB();
 
-// 🔥 CRITICAL FOR VERCEL: Export the app for serverless functions
+// 🔥 Export app for Vercel (serverless functions)
 module.exports = app;
 
-// Only start server locally (not on Vercel)
-if (process.env.NODE_ENV !== 'production') {
+// Only start server locally
+if (process.env.NODE_ENV !== "production") {
   app.listen(port, () => {
-    console.log(`The app is listening on port ${port}`);
-    console.log(`Static files served at: http://localhost:${port}/uploads/`);
+    console.log(`🚀 The app is listening on port ${port}`);
+    console.log(`📂 Static files served at: http://localhost:${port}/uploads/`);
   });
 }
-
+ 
 
 
 

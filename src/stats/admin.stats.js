@@ -45,7 +45,7 @@ router.get("/", async (req, res) => {
             },
             { $sort: { _id: 1 } }  
         ]);
-
+  
         // Result summary
         res.status(200).json({  totalOrders,
             totalSales: totalSales[0]?.totalSales || 0,
