@@ -1,13 +1,14 @@
-// 1. Updated index.js (your main server file)
 const mongoose = require('mongoose');
 const express = require('express');
 const cors = require("cors");
 const path = require('path');
-const fs = require('fs'); // Add this
+const fs = require('fs');
 const AdminRoutes = require("./src/stats/admin.stats");
+
+require('dotenv').config();
+
 const app = express();
 const port = process.env.PORT || 5000;
-require('dotenv').config();
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -15,8 +16,8 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
   console.log('📁 Created uploads directory');
 }
- 
-// CORS must be before other middleware
+
+// CORS configuration
 app.use(cors({
     origin: ["http://localhost:5173", 'https://book-store-app-frontend-jh4k.vercel.app'],
     credentials: true,
@@ -26,9 +27,8 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// 🔥 CRITICAL: Serve static files from uploads directory
+// Serve static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-console.log('📁 Serving static files from:', path.join(__dirname, 'uploads'));
 
 // Debug middleware
 app.use((req, res, next) => {
@@ -36,7 +36,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// Routes
+// 🔥 IMPORTANT: Define root route BEFORE connecting to database
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Book store server is running!',
+    status: 'success',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Health check route
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy', database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
+});
+
+// API Routes
 const bookRoutes = require('./src/books/book.route');
 const orderRoutes = require('./src/orders/order.route');
 const userRoutes = require("./src/users/user.route");
@@ -45,24 +59,120 @@ app.use("/api/books", bookRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/auth", userRoutes);
 app.use("/api/admin", AdminRoutes);
-app.use('/uploads', express.static('uploads'));
 
-async function main() {
-  await mongoose.connect(process.env.DB_URL);
-  
-  app.get('/', (req, res) => {
-    res.send('Book store server is running!');
-  }); 
+// Database connection with better error handling
+async function connectDB() {
+  try {
+    if (!process.env.DB_URL) {
+      throw new Error('DB_URL environment variable is not set');
+    }
+    
+    await mongoose.connect(process.env.DB_URL, {
+      // Add these options for better Vercel compatibility
+      serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+      socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
+    });
+    
+    console.log("MongoDB connected successfully");
+  } catch (error) {
+    console.error("MongoDB connection error:", error);
+    // Don't exit on Vercel, just log the error
+    if (process.env.NODE_ENV !== 'production') {
+      process.exit(1);
+    }
+  }
 }
 
-main()
-  .then(() => console.log("MongoDB connected successfully"))
-  .catch(err => console.log(err));
+// Connect to database
+connectDB();
 
-app.listen(port, () => {
-  console.log(`The app is listening on port ${port}`);
-  console.log(`Static files served at: http://localhost:${port}/uploads/`); 
-});
+// 🔥 CRITICAL FOR VERCEL: Export the app for serverless functions
+module.exports = app;
+
+// Only start server locally (not on Vercel)
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(port, () => {
+    console.log(`The app is listening on port ${port}`);
+    console.log(`Static files served at: http://localhost:${port}/uploads/`);
+  });
+}
+
+
+
+
+
+
+
+
+
+
+
+
+// // 1. Updated index.js (your main server file)
+// const mongoose = require('mongoose');
+// const express = require('express');
+// const cors = require("cors");
+// const path = require('path');
+// const fs = require('fs'); // Add this
+// const AdminRoutes = require("./src/stats/admin.stats");
+// const app = express();
+// const port = process.env.PORT || 5000;
+// require('dotenv').config();
+
+// // Create uploads directory if it doesn't exist
+// const uploadsDir = path.join(__dirname, 'uploads');
+// if (!fs.existsSync(uploadsDir)) {
+//   fs.mkdirSync(uploadsDir, { recursive: true });
+//   console.log('📁 Created uploads directory');
+// }
+ 
+// // CORS must be before other middleware
+// app.use(cors({
+//     origin: ["http://localhost:5173", 'https://book-store-app-frontend-jh4k.vercel.app'],
+//     credentials: true,
+// }));
+
+// // Body parsing middleware
+// app.use(express.json({ limit: '10mb' }));
+// app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// // 🔥 CRITICAL: Serve static files from uploads directory
+// app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// console.log('📁 Serving static files from:', path.join(__dirname, 'uploads'));
+
+// // Debug middleware
+// app.use((req, res, next) => {
+//   console.log(`${req.method} ${req.url} - Content-Type: ${req.get('Content-Type')}`);
+//   next();
+// });
+
+// // Routes
+// const bookRoutes = require('./src/books/book.route');
+// const orderRoutes = require('./src/orders/order.route');
+// const userRoutes = require("./src/users/user.route");
+
+// app.use("/api/books", bookRoutes);
+// app.use("/api/orders", orderRoutes);
+// app.use("/api/auth", userRoutes);
+// app.use("/api/admin", AdminRoutes);
+// app.use('/uploads', express.static('uploads'));
+
+// async function main() {
+//   await mongoose.connect(process.env.DB_URL);
+  
+//   app.get('/', (req, res) => {
+//     res.send('Book store server is running!');
+//   }); 
+// }
+
+// main()
+//   .then(() => console.log("MongoDB connected successfully"))
+//   .catch(err => console.log(err));
+
+// app.listen(port, () => {
+//   console.log(`The app is listening on port ${port}`);
+//   console.log(`Static files served at: http://localhost:${port}/uploads/`); 
+// });
 
 
 
