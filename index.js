@@ -36,6 +36,14 @@ app.use((req, res, next) => {
   next();
 });
 
+// Debug middleware (logs response content type instead of request)
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    console.log(`${req.method} ${req.url} - Response Content-Type: ${res.get('Content-Type') || 'unknown'}`);
+  });
+  next();
+});
+
 // Root route
 app.get('/', (req, res) => {
   res.json({ 
@@ -51,6 +59,15 @@ app.get('/health', (req, res) => {
     status: 'healthy', 
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
     readyState: mongoose.connection.readyState
+  });
+});
+
+// ✅ Debug route for environment variable check
+app.get('/debug-env', (req, res) => {
+  res.json({
+    JWT_SECRET_KEY: process.env.JWT_SECRET_KEY ? "✅ Loaded" : "❌ Missing",
+    DB_URL: process.env.DB_URL ? "✅ Loaded" : "❌ Missing",
+    NODE_ENV: process.env.NODE_ENV || "not set"
   });
 });
 
@@ -89,14 +106,12 @@ async function connectDB() {
     
     await mongoose.connect(process.env.DB_URL, {
       // Optimized for Vercel serverless + MongoDB Atlas free tier
-      serverSelectionTimeoutMS: 15000,  // Increased timeout
+      serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 60000,
-      maxPoolSize: 10,                   // Reduced pool size for serverless
+      maxPoolSize: 10,
       minPoolSize: 0,
-      maxIdleTimeMS: 30000,
-      retryWrites: true,
-      // ⚠️ keep authSource only if required (e.g. self-hosted MongoDB with admin auth)
-      // authSource: 'admin'             
+      maxIdleTimeMS: 30000, 
+      retryWrites: true
     });
     
     console.log("✅ MongoDB connected successfully");
@@ -107,7 +122,7 @@ async function connectDB() {
   }
 }
 
-// 🔥 NEW: Middleware to ensure DB connection before each request
+// 🔥 Middleware to ensure DB connection before each request
 app.use(async (req, res, next) => {
   try {
     if (mongoose.connection.readyState !== 1) {
@@ -117,7 +132,7 @@ app.use(async (req, res, next) => {
     next();
   } catch (error) {
     console.error('❌ Database reconnection failed:', error);
-    next(); // Continue anyway, let the route handle the error
+    next();
   }
 });
 
