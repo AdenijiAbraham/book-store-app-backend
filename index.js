@@ -53,21 +53,71 @@ app.get('/', (req, res) => {
   });
 });
 
-// Health check route
+// Health check route with detailed connection info
 app.get('/health', (req, res) => {
+  const connectionDuration = connectionStartTime 
+    ? Math.round((new Date() - connectionStartTime) / 1000 / 60) 
+    : 'unknown';
+    
   res.json({ 
     status: 'healthy', 
     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    readyState: mongoose.connection.readyState
+    readyState: mongoose.connection.readyState,
+    connectionDuration: `${connectionDuration} minutes`,
+    lastConnected: connectionStartTime ? connectionStartTime.toISOString() : 'never',
+    reconnectAttempts: reconnectAttempts
   });
 });
 
-// ✅ Debug route for environment variable check
+// 🆕 Atlas connection keep-alive endpoint
+app.get('/keep-alive', async (req, res) => {
+  try {
+    // Simple ping to keep connection alive
+    await mongoose.connection.db.admin().ping();
+    res.json({ 
+      status: 'alive', 
+      timestamp: new Date().toISOString(),
+      connectionState: mongoose.connection.readyState 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: error.message,
+      connectionState: mongoose.connection.readyState 
+    });
+  }
+});
+
+// ✅ Enhanced debug route for Atlas troubleshooting
 app.get('/debug-env', (req, res) => {
+  const dbUrl = process.env.DB_URL;
+  let dbInfo = "❌ Missing";
+  
+  if (dbUrl) {
+    // Parse Atlas connection string for debugging (safely)
+    const isAtlas = dbUrl.includes('mongodb+srv://');
+    const hasCredentials = dbUrl.includes('@');
+    const cluster = isAtlas ? dbUrl.match(/@([^/]+)/)?.[1] : 'local';
+    
+    dbInfo = {
+      status: "✅ Loaded",
+      type: isAtlas ? "MongoDB Atlas" : "Local/Self-hosted",
+      cluster: cluster || "unknown",
+      hasCredentials: hasCredentials ? "✅ Yes" : "❌ No"
+    };
+  }
+  
   res.json({
     JWT_SECRET_KEY: process.env.JWT_SECRET_KEY ? "✅ Loaded" : "❌ Missing",
-    DB_URL: process.env.DB_URL ? "✅ Loaded" : "❌ Missing",
-    NODE_ENV: process.env.NODE_ENV || "not set"
+    DB_URL: dbInfo,
+    NODE_ENV: process.env.NODE_ENV || "not set",
+    mongooseState: mongoose.connection.readyState,
+    connectionStates: {
+      0: "disconnected",
+      1: "connected", 
+      2: "connecting",
+      3: "disconnecting"
+    }
   });
 });
 
@@ -81,8 +131,12 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/auth", userRoutes);
 app.use("/api/admin", AdminRoutes);
 
-// 🔥 IMPROVED: MongoDB connection with auto-reconnection
+// 🔥 ENHANCED: Robust MongoDB connection with better reconnection logic
 let isConnecting = false;
+let reconnectTimeout = null;
+let reconnectAttempts = 0;
+const maxReconnectAttempts = 5;
+const reconnectInterval = 5000; // 5 seconds
 
 async function connectDB() {
   if (isConnecting) {
@@ -96,57 +150,136 @@ async function connectDB() {
       return;
     }
     
-    if (mongoose.connection.readyState === 1) {
-      console.log('✅ MongoDB already connected');
-      return;
+    // Clear any existing reconnect timeout
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
     }
 
     isConnecting = true;
     console.log('🔄 Connecting to MongoDB...');
     
+    // Close existing connection if it exists
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.disconnect();
+    }
+    
     await mongoose.connect(process.env.DB_URL, {
-      // Optimized for Vercel serverless + MongoDB Atlas free tier
-      serverSelectionTimeoutMS: 15000,
-      socketTimeoutMS: 60000,
-      maxPoolSize: 10,
-      minPoolSize: 0,
-      maxIdleTimeMS: 30000, 
-      retryWrites: true
+      // Optimized for MongoDB Atlas
+      serverSelectionTimeoutMS: 5000,     // Atlas responds quickly
+      socketTimeoutMS: 45000,             // Atlas timeout is ~30s, so buffer it
+      heartbeatFrequencyMS: 10000,        // Regular health checks for Atlas
+      maxPoolSize: 5,                     // Atlas M0 has connection limits
+      minPoolSize: 1,                     // Keep at least 1 connection alive
+      maxIdleTimeMS: 30000,               // Atlas closes idle connections
+      waitQueueTimeoutMS: 5000,           // Don't wait too long for Atlas
+      retryWrites: true,                  // Essential for Atlas replica sets
+      connectTimeoutMS: 10000,            // Atlas connects fast
+      family: 4,                          // Force IPv4 (Atlas sometimes has IPv6 issues)
     });
     
     console.log("✅ MongoDB connected successfully");
+    reconnectAttempts = 0; // Reset attempts on successful connection
+    
   } catch (error) {
     console.error("❌ MongoDB connection error:", error.message);
+    
+    // Implement exponential backoff for reconnection
+    reconnectAttempts++;
+    if (reconnectAttempts <= maxReconnectAttempts) {
+      const delay = reconnectInterval * Math.pow(2, reconnectAttempts - 1);
+      console.log(`🔄 Retrying connection in ${delay / 1000} seconds (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+      
+      reconnectTimeout = setTimeout(() => {
+        isConnecting = false;
+        connectDB();
+      }, delay);
+    } else {
+      console.error(`❌ Max reconnection attempts (${maxReconnectAttempts}) reached. Stopping reconnection attempts.`);
+      reconnectAttempts = 0; // Reset for next manual attempt
+    }
   } finally {
-    isConnecting = false;
+    if (!reconnectTimeout) {
+      isConnecting = false;
+    }
   }
 }
 
-// 🔥 Middleware to ensure DB connection before each request
+// 🔥 Enhanced middleware to ensure DB connection
 app.use(async (req, res, next) => {
   try {
-    if (mongoose.connection.readyState !== 1) {
+    if (mongoose.connection.readyState !== 1 && !isConnecting) {
       console.log('🔄 Database disconnected, attempting to reconnect...');
-      await connectDB();
+      connectDB(); // Don't await here to avoid blocking requests
     }
     next();
   } catch (error) {
     console.error('❌ Database reconnection failed:', error);
-    next();
+    next(); // Continue anyway
   }
 });
 
-// Handle mongoose connection events
+// 🔥 Enhanced mongoose connection event handlers with detailed logging
+let connectionStartTime = null;
+
 mongoose.connection.on('connected', () => {
-  console.log('🟢 Mongoose connected to MongoDB');
+  connectionStartTime = new Date();
+  console.log('🟢 Mongoose connected to MongoDB Atlas');
+  console.log(`🕐 Connection established at: ${connectionStartTime.toISOString()}`);
+  reconnectAttempts = 0; // Reset attempts on successful connection
 });
 
 mongoose.connection.on('disconnected', () => {
-  console.log('🔴 Mongoose disconnected from MongoDB');
+  const disconnectTime = new Date();
+  const connectionDuration = connectionStartTime 
+    ? Math.round((disconnectTime - connectionStartTime) / 1000 / 60) 
+    : 'unknown';
+    
+  console.log('🔴 Mongoose disconnected from MongoDB Atlas');
+  console.log(`🕐 Disconnected at: ${disconnectTime.toISOString()}`);
+  console.log(`⏱️  Connection lasted: ${connectionDuration} minutes`);
+  
+  // Auto-reconnect on disconnection
+  if (!isConnecting && reconnectAttempts < maxReconnectAttempts) {
+    console.log('🔄 Attempting to reconnect to MongoDB Atlas...');
+    setTimeout(() => {
+      if (mongoose.connection.readyState === 0) { // Only if still disconnected
+        connectDB();
+      }
+    }, reconnectInterval);
+  }
 });
 
 mongoose.connection.on('error', (err) => {
-  console.error('🚨 Mongoose connection error:', err);
+  console.error('🚨 Mongoose connection error:', err.message);
+  console.error('🔍 Error type:', err.name);
+  
+  // Log specific Atlas-related errors
+  if (err.message.includes('Server selection timed out')) {
+    console.error('💡 Tip: This might be a network or Atlas cluster issue');
+  }
+  if (err.message.includes('Authentication failed')) {
+    console.error('💡 Tip: Check your Atlas database user credentials');
+  }
+  if (err.message.includes('IP not in whitelist')) {
+    console.error('💡 Tip: Add your IP to Atlas Network Access whitelist');
+  }
+});
+
+mongoose.connection.on('reconnected', () => {
+  connectionStartTime = new Date();
+  console.log('🟡 Mongoose reconnected to MongoDB Atlas');
+  console.log(`🕐 Reconnection established at: ${connectionStartTime.toISOString()}`);
+});
+
+// Handle process termination
+process.on('SIGINT', async () => {
+  console.log('🛑 Received SIGINT. Gracefully shutting down...');
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+  }
+  await mongoose.connection.close();
+  process.exit(0);
 });
 
 // Initial connection
@@ -162,8 +295,6 @@ if (process.env.NODE_ENV !== 'production') {
     console.log(`Static files served at: http://localhost:${port}/uploads/`);
   });
 }
-
-
 
 
 
