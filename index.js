@@ -19,7 +19,7 @@ if (!fs.existsSync(uploadsDir)) {
 
 // CORS configuration
 app.use(cors({
-    origin: ["http://localhost:5173", "https://book-store-app-frontend-jh4k.vercel.app"],
+    origin: ["http://localhost:5173", 'https://book-store-app-frontend-jh4k.vercel.app'],
     credentials: true,
 }));
 
@@ -49,7 +49,8 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' 
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    readyState: mongoose.connection.readyState
   });
 });
 
@@ -63,70 +64,106 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/auth", userRoutes);
 app.use("/api/admin", AdminRoutes);
 
-// ✅ Database connection with caching for Vercel (critical)
-let isConnected = null;
+// 🔥 IMPROVED: MongoDB connection with auto-reconnection
+let isConnecting = false;
 
 async function connectDB() {
-  if (isConnected) {
-    console.log("⚡ Using existing MongoDB connection");
+  if (isConnecting) {
+    console.log('⏳ Connection already in progress...');
     return;
   }
-
+  
   try {
     if (!process.env.DB_URL) {
-      throw new Error("DB_URL environment variable is not set");
+      console.error('❌ DB_URL environment variable is not set');
+      return;
+    }
+    
+    if (mongoose.connection.readyState === 1) {
+      console.log('✅ MongoDB already connected');
+      return;
     }
 
-    const db = await mongoose.connect(process.env.DB_URL, {
-      serverSelectionTimeoutMS: 5000, // Timeout after 5s
-      socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
+    isConnecting = true;
+    console.log('🔄 Connecting to MongoDB...');
+    
+    await mongoose.connect(process.env.DB_URL, {
+      // Optimized for Vercel serverless + MongoDB Atlas free tier
+      serverSelectionTimeoutMS: 15000,  // Increased timeout
+      socketTimeoutMS: 60000,
+      maxPoolSize: 10,                   // Reduced pool size for serverless
+      minPoolSize: 0,
+      maxIdleTimeMS: 30000,
+      retryWrites: true,
+      // ⚠️ keep authSource only if required (e.g. self-hosted MongoDB with admin auth)
+      // authSource: 'admin'             
     });
-
-    isConnected = db.connections[0].readyState === 1;
+    
     console.log("✅ MongoDB connected successfully");
   } catch (error) {
     console.error("❌ MongoDB connection error:", error.message);
-    if (process.env.NODE_ENV !== "production") {
-      process.exit(1); // Only crash locally
-    }
+  } finally {
+    isConnecting = false;
   }
 }
 
-// Connect to DB immediately
+// 🔥 NEW: Middleware to ensure DB connection before each request
+app.use(async (req, res, next) => {
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      console.log('🔄 Database disconnected, attempting to reconnect...');
+      await connectDB();
+    }
+    next();
+  } catch (error) {
+    console.error('❌ Database reconnection failed:', error);
+    next(); // Continue anyway, let the route handle the error
+  }
+});
+
+// Handle mongoose connection events
+mongoose.connection.on('connected', () => {
+  console.log('🟢 Mongoose connected to MongoDB');
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('🔴 Mongoose disconnected from MongoDB');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('🚨 Mongoose connection error:', err);
+});
+
+// Initial connection
 connectDB();
 
-// 🔥 Export app for Vercel (serverless functions)
+// Export for Vercel
 module.exports = app;
 
-// Only start server locally
-if (process.env.NODE_ENV !== "production") {
+// Only listen locally
+if (process.env.NODE_ENV !== 'production') {
   app.listen(port, () => {
-    console.log(`🚀 The app is listening on port ${port}`);
-    console.log(`📂 Static files served at: http://localhost:${port}/uploads/`);
+    console.log(`The app is listening on port ${port}`);
+    console.log(`Static files served at: http://localhost:${port}/uploads/`);
   });
 }
- 
 
 
 
 
 
 
-
-
-
-
-
-// // 1. Updated index.js (your main server file)
 // const mongoose = require('mongoose');
 // const express = require('express');
 // const cors = require("cors");
 // const path = require('path');
-// const fs = require('fs'); // Add this
+// const fs = require('fs');
 // const AdminRoutes = require("./src/stats/admin.stats");
+
+// require('dotenv').config();
+
 // const app = express();
 // const port = process.env.PORT || 5000;
-// require('dotenv').config();
 
 // // Create uploads directory if it doesn't exist
 // const uploadsDir = path.join(__dirname, 'uploads');
@@ -134,10 +171,10 @@ if (process.env.NODE_ENV !== "production") {
 //   fs.mkdirSync(uploadsDir, { recursive: true });
 //   console.log('📁 Created uploads directory');
 // }
- 
-// // CORS must be before other middleware
+
+// // CORS configuration
 // app.use(cors({
-//     origin: ["http://localhost:5173", 'https://book-store-app-frontend-jh4k.vercel.app'],
+//     origin: ["http://localhost:5173", "https://book-store-app-frontend-jh4k.vercel.app"],
 //     credentials: true,
 // }));
 
@@ -145,9 +182,8 @@ if (process.env.NODE_ENV !== "production") {
 // app.use(express.json({ limit: '10mb' }));
 // app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// // 🔥 CRITICAL: Serve static files from uploads directory
+// // Serve static files
 // app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-// console.log('📁 Serving static files from:', path.join(__dirname, 'uploads'));
 
 // // Debug middleware
 // app.use((req, res, next) => {
@@ -155,7 +191,24 @@ if (process.env.NODE_ENV !== "production") {
 //   next();
 // });
 
-// // Routes
+// // Root route
+// app.get('/', (req, res) => {
+//   res.json({ 
+//     message: 'Book store server is running!',
+//     status: 'success',
+//     timestamp: new Date().toISOString()
+//   });
+// });
+
+// // Health check route
+// app.get('/health', (req, res) => {
+//   res.json({ 
+//     status: 'healthy', 
+//     database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' 
+//   });
+// });
+
+// // API Routes
 // const bookRoutes = require('./src/books/book.route');
 // const orderRoutes = require('./src/orders/order.route');
 // const userRoutes = require("./src/users/user.route");
@@ -164,88 +217,65 @@ if (process.env.NODE_ENV !== "production") {
 // app.use("/api/orders", orderRoutes);
 // app.use("/api/auth", userRoutes);
 // app.use("/api/admin", AdminRoutes);
-// app.use('/uploads', express.static('uploads'));
 
-// async function main() {
-//   await mongoose.connect(process.env.DB_URL);
-  
-//   app.get('/', (req, res) => {
-//     res.send('Book store server is running!');
-//   }); 
+// // ✅ Database connection with caching for Vercel (critical)
+// let isConnected = null;
+
+// async function connectDB() {
+//   if (isConnected) {
+//     console.log("⚡ Using existing MongoDB connection");
+//     return;
+//   }
+
+//   try {
+//     if (!process.env.DB_URL) {
+//       throw new Error("DB_URL environment variable is not set");
+//     }
+
+//     const db = await mongoose.connect(process.env.DB_URL, {
+//       serverSelectionTimeoutMS: 5000, // Timeout after 5s
+//       socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
+//     });
+
+//     isConnected = db.connections[0].readyState === 1;
+//     console.log("✅ MongoDB connected successfully");
+//   } catch (error) {
+//     console.error("❌ MongoDB connection error:", error.message);
+//     if (process.env.NODE_ENV !== "production") {
+//       process.exit(1); // Only crash locally
+//     }
+//   }
 // }
 
-// main()
-//   .then(() => console.log("MongoDB connected successfully"))
-//   .catch(err => console.log(err));
+// // Connect to DB immediately
+// connectDB();
 
-// app.listen(port, () => {
-//   console.log(`The app is listening on port ${port}`);
-//   console.log(`Static files served at: http://localhost:${port}/uploads/`); 
-// });
+// // 🔥 Export app for Vercel (serverless functions)
+// module.exports = app;
 
-
-
-
-// //indexe.js
-
-// const mongoose = require('mongoose');
-// const express = require('express')
-// const cors = require("cors")
-// const AdminRoutes = require("./src/stats/admin.stats")
-
-// const app = express()
-// const port = process.env.PORT||5000;
-// require('dotenv').config()
-
-// //middleware'
-// app.use(express.json());
-// app.use(cors({
-//     origin: ["http://localhost:5173"],
-//     credentials : true, 
+// // Only start server locally
+// if (process.env.NODE_ENV !== "production") {
+//   app.listen(port, () => {
+//     console.log(`🚀 The app is listening on port ${port}`);
+//     console.log(`📂 Static files served at: http://localhost:${port}/uploads/`);
+//   });
+// }
  
-// })) 
-   
-// // routes
-//  const bookRoutes = require('./src/books/book.route')
-//  const orderRoutes = require('./src/orders/order.route')
-// const userRoutes = require("./src/users/user.route")
-
-//  app.use("/api/books", bookRoutes)
-//  app.use("/api/orders", orderRoutes)
-//  app.use("/api/auth", userRoutes)
-//   app.use("/api/admin", AdminRoutes)
-
-// async function main() {
-//   await mongoose.connect(process.env.DB_URL);
-//   //password : 6C0QcVeKqb5KvAgO  
-//   // username : adenijiabraham29
-
-//   // password 4 bookstore :  skdyhyowjoPFIpsE
-// app.use('/', (req, res) => {
-//   res.send('Book store server is running !')
-// })  
-
-// }
-
-// main().then(() => console.log("Mongodb connected successfully")).catch(err => console.log(err));
-
-
-// app.listen(port, () => {
-//   console.log(`The app is listening on port ${port}`)
-// })
 
 
 
 
-// const express = require('express')
-// const app = express()
-// const port = 3000
 
-// app.get('/', (req, res) => {
-//   res.send('Hello World!')
-// })
 
-// app.listen(port, () => {
-//   console.log(`Example app listening on port ${port}`)
-// })
+
+
+
+
+
+// .env
+// DB_URL ="mongodb+srv://adenijiabraham29:skdyhyowjoPFIpsE@cluster0.l1bu69e.mongodb.net/Book-store?retryWrites=true&w=majority&appName=Cluster0"
+
+// JWT_SECRET_KEY ='d3c04a65d3223346ba17ede66f253492025eecc531e0edc287c77fa088156d6edd7785bc76010404ce93f1b772336e8c7e9f5bac34e159a0a41d3041db8c9b4f'
+
+
 
