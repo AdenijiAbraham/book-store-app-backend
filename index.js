@@ -300,7 +300,7 @@ module.exports = app;
 if (process.env.NODE_ENV !== 'production') {
   app.listen(port, () => {
     console.log(`The app is listening on port ${port}`);
-    console.log(`Static files served at: http://localhost:${port}/uploads/`);
+    console.log(`Static files served at: http://localhost:${port}:`);
   });
 }
 
