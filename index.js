@@ -16,12 +16,20 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
   console.log('📁 Created uploads directory');
 }
+  
 
-// CORS configuration
+// CORS configuration - Updated to allow all Vercel deployments
 app.use(cors({
-    origin: ["http://localhost:5173", 'https://book-store-app-frontend-jh4k.vercel.app'],
+    origin: [
+        'http://localhost:5173', 
+        'https://book-store-app-frontend-jh4k.vercel.app',
+        // Allow all Vercel preview deployments
+        /^https:\/\/book-store-app-frontend-jh4k-.*\.vercel\.app$/
+    ],
     credentials: true,
 }));
+
+
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
